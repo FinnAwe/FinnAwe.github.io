@@ -1,0 +1,168 @@
+---
+layout: post
+title:  "什么是左值和右值?理解右值引用和移动语义"
+date:   2023-02-07 17:00:09 +0800
+categories: c++
+---
+
+[toc]
+# 什么是右值引用?什么是左值?什么是右值?
+@(编程语言C++)[311-c++,  310-编程语言]
+
+c++11 标准引入了右值引用的概念，那什么是右值引用？什么是右值？什么是左值？要回答这些问题，必须理解引入右值引用概念的动机，和右值引用一同引入的概念还有移动语义，其目的在于提高特殊情形下的对象拷贝效率，在一些情形下，可以直接转移源对象的资源到目的对象，可以减少拷贝时重新分配资源的开销。
+
+## 右值引用和移动语义要解决的问题
+假设有这么一个类，类的成员之一是指向堆内存的指针，那么在拷贝这个类对象的时候，似乎难以避免重新为新对象的指针成员重新分配内存：
+```cpp
+#include <iostream>
+#include <cstring>
+
+class HasPtrMember
+{
+public:
+	char * ptr;//指向连续内存
+public:
+	~HasPtrMember()
+	{
+		if(ptr){delete ptr;ptr=nullptr;}
+		std::cout<< "HasPtrMember dector" << std::endl;
+	}
+	HasPtrMember()
+	{
+		ptr = new char[20];
+		std::cout<< "HasPtrMember ctor" << std::endl;
+	}
+	HasPtrMember(const HasPtrMember & rh)
+	{
+		ptr = new char[20];
+		memcpy(ptr,rh.ptr,sizeof(char)*20);
+		std::cout<< "HasPtrMember copy ctor" << std::endl;
+	}
+	void Foo()
+	{
+		std::cout<< __func__<< std::endl;
+	}
+};
+
+HasPtrMember FactoryFunction()
+{
+    HasPtrMember a;
+    a.Foo();
+	return a;
+}
+
+int main()
+{
+	HasPtrMember a = FactoryFunction();
+	a.Foo();
+	return 0;
+}
+
+//g++ --std=c++11 about_copy_constructor.cpp -fno-elide-constructors
+
+输出：
+HasPtrMember ctor
+Foo
+HasPtrMember copy ctor
+HasPtrMember dector
+HasPtrMember copy ctor
+HasPtrMember dector
+Foo
+HasPtrMember dector
+```
+> **注意**：对于示例代码， 我们可以用更好的设计或者依靠编译器优化去避免拷贝，但在这里我们讨论的是编程语言特性，不考虑设计问题，示例只是我们可能会遇到的情形的一种粗糙模型，因此同时我们在编译时也要加上选项 -fno-elide-constructors，让编译器不忽略我们的拷贝过程。
+
+这段简单的代码发生了两次拷贝，然而观察发现，发生拷贝之后，这些"临时"对象就被析构了，那么我们有没有办法利用这些即将被析构的对象所指向的堆内存，去避免重新分配新的堆内存呢？假如可以在拷贝时，只是将源对象的指针“交接”给新对象，不就可以减少内存分配的消耗，提高我们拷贝对象的效率。
+
+c++ 为我们提供了系统的解决方案，就是引进移动语义（move semantics），我们可以为类定义移动构造函数：
+```cpp
+HasPtrMember(HasPtrMember && rh)
+{
+	ptr = rh.ptr;
+       rh.ptr = nullptr;
+	std::cout<< "HasPtrMember move ctor" << endl;
+}
+
+//g++ --std=c++11 about_copy_constructor.cpp -fno-elide-constructors
+
+输出：
+HasPtrMember ctor
+Foo
+HasPtrMember move ctor
+HasPtrMember dector
+HasPtrMember move ctor
+HasPtrMember dector
+Foo
+HasPtrMember dector
+```
+
+对于上述例子钟的“临时”对象，拷贝时调用的是移动构造函数，新对象从源对象中“偷”来了指针指向的堆内存，而不是从新分配，减少了内存分配的次数，重用即将被释放的资源。
+
+新增的移动构造函数 HasPtrMember(HasPtrMember && rh) 的形参是**右值引用**， 而拷贝构造函数 HasPtrMember(const HasPtrMember & rh)，的形参是**常量左值引用**， 那么问题来了：**什么情况下会调用移动构造函数，什么情况下会调用拷贝构造函数呢？**，要回答这问题，得先要了解左值和右值的概念。
+
+## 左值，右值和右值引用
+每个 c++ 表达式（expression）都有两个维度的属性：类型（type）和值分类（value category）， 左值（lvalue）和右值（rvalue）描述就是表达式值分类属性。出于历史原因，在C语言中，“左右”的说法来源于左值只能出现在赋值运算符的左边，而右值只能出现在赋值运算符的右边，在C++中，这种判断方法依然有效。
+
+在 C++ 11 中， 右值是由两个概念构成的， 一个是将亡值（ xvalue，eXpiring Value）， 另一个则是纯右值（ prvalue， Pure Rvalue）。在 C++11 中， 所有的值比属于左值，将亡值，纯右值三者之一。
+
+> 值得注意的是，我们一般很少见到左值右值的精确定义的一个原因是其很难归纳。而且即使归纳了，也需要大量的解释。
+
+纯右值：
+- 非引用函数返回的变量值
+- 内置运算表达式返回的临时值，如 1+3
+- 字面量值。如：1, true, 'c', "string"
+- lambda表达式
+
+将亡值：
+- 返回右值引用T&&的函数返回值
+- 库函数 std::move 的返回值
+- 转换为 T&& 的 类型转换函数的返回值
+
+其余的值，可以标识函数和对象的值，都是属于左值（例如上述代码示例中main函数的变量 a，a 标志了一个HasPtrMember对象）。
+
+引入了右值引用后，我们称C++11前的引用为“左值引用”，因此引用可以分为左值引用，常量左值引用，右值引用，常量右值引用：
+- int& 左值引用
+- const int& 常量右值引用
+- int && 右值引用
+- conts int && 常量右值引用
+
+左值引用可以绑定到左值， 右值引用可以绑定到右值，而右值引用不可绑定到左值，左值引用不可绑定到右值：
+```cpp
+int a = 0;
+int && b = c;//编译错误
+int & c = 0;//编译错误
+const int & d =0;//编译通过
+```
+注意到常量左值引用的定位是“万能引用”，既可以绑定左值也可以绑定到右值。例如上面的 HasPtrMember 类的例子，即使没有定义移动构造函数，代码也能如期望的运行，原因就是右值也能绑定到左值引用，就算没有移动构造函数，也能调用拷贝构造函数。
+
+现在我们可以回答上一章提到的问题：**什么情况下会调用移动构造函数，什么情况下会调用拷贝构造函数呢？**
+
+这个问题转变成了**函数匹配**的问题：当拷贝的源对象是右值时且类定义了移动构造函数，调用移动构造函数；当拷贝的源对象是左值时，调用拷贝构造函数；由于拷贝构造函数的形参是常量左值引用，可以绑定左值和右值，所以假如没有定义移动构造函数，那么就调用拷贝构造函数。
+
+我们这里没有讨论常量右值引用，是因为当绑定一个右值到右值引用，意味着要修改这个值，所以常量右值引用没有什么实际应用意义。
+
+## 判断引用类型的库函数 is_rvalue_reference、is_lvalue_reference、is_reference
+有的时候，我们可能不知道一个类型是否是引用类型，以及是左值引用还是右值引用（这在模板中比较常见）。标准库在<type_traits>头文件中提供了3个模板类：is_rvalue_reference、is_lvalue_reference、is_reference，可供我们进行判断。
+
+
+## 小结
+每个 C++ 表达式都有两个维度的属性，其一是类型，其二是值分类。我们在讨论左值和右值时，就是在讨论值分类。一个c++ 表达式比属于左值，将亡值，纯右值三者之一。
+
+“左右”尽管是c的历史遗留说法，但我们依然可以用可以出现在赋值表达式等号左右的位置去辨别一个值是左值还是右值。
+
+非引用函数返回的变量值，内置运算表达式返回的临时值，字面量值， lambda表达式，都是纯右值。而一个返回右值引用的函数返回值，std::move返回值，都是将亡值。其余的表达式，可以用以标识函数和对象的值，都是属于左值。
+
+左值引用可以绑定左值，右值引用可以绑定右值，而常量左值引用可以绑定左值和右值。
+
+左值和右值没有精确的定义，归纳起来也需要大量的解释。在C++11之前，我们不需要关心左值和右值，在C++11引入右值引用和移动语义之后，我们才开始关心左值和右值。我们可以结合引入右值引用和移动语义要解决的问题为切入点，去理解左值和右值的概念，当然更重要的是问题本身和问题的解决方案。
+
+右值引用和移动语义概念的引用，目的在于提高特殊情形下的对象拷贝效率，在一些情形下，可以直接转移源对象的资源到目的对象，可以减少拷贝时重新分配资源的开销。
+
+对于需要管理资源（如堆内存）的类，我们为其定义拷贝构造函数和移动构造函数，在发生拷贝的场景时，假如拷贝源对象是右值，那么就调用移动构造函数，假如源对象是左值，我们就调用拷贝构造函数。当类没有定义移动构造函数，只定义了拷贝构造函数时，由于常量左值引用可以绑定左值和右值，因此不管源对象是左值还是右值，都可以调用拷贝构造函数。
+
+参考：
+
+[cppreference.com Value categories](https://en.cppreference.com/w/cpp/language/value_category)
+
+
+[Michael Wong; IBM XL译器中国开发团队. 深入理解C++11 ：C++11 新特性解析与应用 (原创精品系列) . 机械工业出版社. Kindle 版本. ](https://www.amazon.cn/)
