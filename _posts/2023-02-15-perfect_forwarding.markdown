@@ -1,0 +1,186 @@
+---
+layout: post
+title:  "理解 c++11 完美转发问题"
+date:   2023-02-15 17:00:09 +0800
+categories: c++
+---
+[TOC]
+# 理解 C++ 11完美转发问题
+@(编程语言C++)[311-c++, 310-编程语言]
+
+在这篇文章我们将解决以下这些问题：
+- 什么是完美转发? 
+- 为什么需要完美转发?
+- c++ 11 如何解决完美转发问题?
+- 完美转发的意义是什么?
+
+
+## 什么是完美转发问题？
+假设有这么一个模板函数，只负责转发的功能，将传入的参数转发给真正执行的函数：
+
+```cpp
+	template<class T>
+	void Func(T& a)
+	{
+		RunCode(a);
+	}
+```
+
+在 c++11 之前，我们不关心传入实参是左值还是右值，在C++引入移动移动语义之后，我们想充分利用移动语义特性提高程序性能，所以想转发参数的函数尽可能的保留实参的属性（保留类型/值属性/顶层const），这就是**完美转发问题**。
+	> 关于左值右值，右值引用和移动语义的讨论，见另一篇文章[什么是右值引用?什么是左值?什么是右值?]()
+
+
+## C++ 11 如何解决完美问题
+
+我们可以尝试解决这个问题, 首先得让模板函数能够接受左值和右值实参:
+
+```cpp
+	template<class T>
+	void Func(const T& a)
+	{
+		RunCode(a);
+	}
+```
+
+让模板函数Func的形参为const T&，那么就模板函数的形参就可以绑定左值和右值。但是这种情况下，无论传入的参数是左值或是右值， a 都是一个常量左值引用，是个左值，我们依旧不能利用移动语义的特性。
+
+为了解决完美转发问题，C++ 引入**万能引用**[<sup>1</sup>](#refer-anchor-1)和**引用折叠规则**[<sup>2</sup>](#refer-anchor-2)。
+
+```cpp
+	template<class T>
+	void Func(T&& a)
+	{
+		RunCode(a);
+	}
+```
+
+c++ 11 规定，当模板函数的参数为 T&& 时，传入的参数不同，T类型的推断不一样，我们假设传入的参数类型为X：
+- 当传入的参数是左值时，T推断为 X& ，也就是说函数参数类型变成了 X& &&
+- 当传入的参数时右值时，T推断为 X&& ，也就是说函数参数类型变成了 X&& &&
+
+c++ 11 中新增了**引用折叠**规则，其规律就是右值引用的右值引用折叠为右值引用，其余都折叠成左值引用：
+- X& && 折叠为 X&, 传入的参数 a 为左值引用
+- TX&& && 折叠为 X&&, 传入的参数 a 为右值引用
+
+无论 a 是左值引用还是右值引用，a 都是具名对象，也就是说，a 始终是个左值。那我们有什么办法让左值引用保持左值，右值引用转为右值呢？我们还得利用引用折叠的规则，利用`static_cast`静态类型转换函数坐引用转换，在C++11, 将一个左值转换成右值引用是允许的：
+
+```cpp
+	template<class T>
+	void Func(T&& a)
+	{
+		RunCode(static_cast<T&&>(a);
+	}
+```
+
+当传入的参数为左值时，根据模板函数推断规则，T推断为X&：
+```cpp
+	void Func(X& && a)
+	{
+		RunCode(static_cast<X& &&>(a));
+	}
+```
+引用折叠后的结果：
+```cpp
+	void Func(X& a)
+	{
+		RunCode(static_cast<X&>(a));
+	}
+```
+
+当然我们的重点还是在传入参数是右值的时候，模板参数推断的结果如下：
+```cpp
+	void Func(X&& && a)
+	{
+		RunCode(static_cast<X&& &&>(a));
+	}
+```
+引用折叠后的结果：
+```cpp
+	void Func(X&& a)
+	{
+		RunCode(static_cast<X&&>(a));
+	}
+```
+返回右值引用的表达式`static_cast<X&&>(a)`是一个右值。
+
+在 C++11 我们用库函数 `std::forward` 转发 ，通常forward函数的实现就是 `static_cast`，完美转发的解决方案如下，`std::forward`必须显式的传递模板参数T：
+
+```cpp
+	void Wrapper(T&& a)
+	{
+		RunCode(std::forward<T>(a));
+	}
+```
+
+## 完美转发的完整例子
+我们来看完美转发的完整例子：
+```cpp
+#include <iostream>
+#include <type_traits>
+
+//overload function RunCode()
+void RunCode(int & a){std::cout<< "RunCode Lvalue reference " << std::endl;}
+void RunCode(const int & a){std::cout<< "RunCode Lvalue reference to const " << std::endl;}
+void RunCode(int && a){std::cout<< "RunCode Rvalue reference " << std::endl;}
+void RunCode(const int && a){std::cout<< "RunCode Rvalue reference to cost" << std::endl;}
+
+template <class T>
+void foo(T && a)
+{
+    std::cout<<"is rvalue reference="<<std::is_rvalue_reference<decltype(a)>::value << std::endl;
+    std::cout<<"is lvalue reference="<<std::is_lvalue_reference<decltype(a)>::value << std::endl;
+    std::cout<<"is const="<<std::is_const<typename std::remove_reference<decltype(a)>::type>::value << std::endl;
+    RunCode(std::forward<T>(a));
+}
+
+int main()
+{
+    int i = 1;
+    const int ci = 2;
+    const int && ri = i*ci;
+    foo(i);
+    foo(ci);
+    foo(i*ci);
+    foo(ri);
+
+    return 0;
+}
+
+输出：
+is rvalue reference=0
+is lvalue reference=1
+is const=0
+RunCode Lvalue reference 
+is rvalue reference=0
+is lvalue reference=1
+is const=1
+RunCode Lvalue reference to const 
+is rvalue reference=1
+is lvalue reference=0
+is const=0
+RunCode Rvalue reference 
+is rvalue reference=0
+is lvalue reference=1
+is const=1
+RunCode Lvalue reference to const 
+
+```
+
+在这段代码中，我们用`<type_traits>`头文件中的 `std::is_rvalue_reference` 和 `std::is_lvalue_reference` 验证万能引用和引用折叠的结果。用`std::remove_reference` 配合 `std::is_const` 验证参数的常量属性在转发时是否保留。
+
+具名的右值引用 `ri` ，虽然是和右值绑定，但是引用本身是左值。这个例子也展示了右值引用的另一个作用：延长右值的生命周期。
+
+
+## 小结
+什么是模式(pattern)？Each pattern is a commonly accepted solution to a frequently occurring design problem. 我将完美转发称之为一种模式，完美转发解决了**函数在传递参数时，尽可能保留参数属性的问题**。
+
+利用完美转发模式，我们可以充分利用c++11的移动语义特性以提高程序的性能。另一方面，完美转发可以减少函数重载的代码，我们不必重载接受左值参数和右值参数不同版本的函数，以保持代码的简洁。
+
+
+## 参考
+<div id="refer-anchor-1"></div>
+- [1] [万能引用 Scott Meyer. Universal References ](https://isocpp.org/blog/2012/11/universal-references-in-c11-scott-meyers)
+ <div id="refer-anchor-2"></div>
+- [2] [引用折叠 reference collapsing](https://en.cppreference.com/w/cpp/language/reference)
+- [3] [Perfect Forwarding](https://www.modernescpp.com/index.php/perfect-forwarding)
+- [4] [C++ Rvalue References Explained By Thomas Becker](http://thbecker.net/articles/rvalue_references/section_01.html)
